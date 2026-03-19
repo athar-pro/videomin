@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Videomin</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background-color: #121212;
+            color: #e0e0e0;
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .container {
+            background: #1e1e1e;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+        .video-container {
+            width: 100%;
+            background: #000;
+            border-radius: 4px;
+            margin-bottom: 20px;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+        }
+        canvas {
+            max-width: 100%;
+            height: auto;
+            display: block;
+        }
+        /* Hide the original video, we only want to see the canvas */
+        video {
+            display: none; 
+        }
+        .controls-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .control-group {
+            display: flex;
+            flex-direction: column;
+        }
+        label {
+            margin-bottom: 8px;
+            font-weight: bold;
+            font-size: 14px;
+            display: flex;
+            justify-content: space-between;
+        }
+        input[type="range"] {
+            width: 100%;
+        }
+        .buttons {
+            display: flex;
+            gap: 10px;
+            margin-top: 20px;
+        }
+        button {
+            background: #3b82f6;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background: #2563eb;
+        }
+        button:disabled {
+            background: #4b5563;
+            cursor: not-allowed;
+        }
+        .status {
+            margin-top: 15px;
+            font-size: 14px;
+            color: #10b981;
+        }
+        input[type="file"] {
+            margin-bottom: 20px;
+            padding: 10px;
+            background: #2d2d2d;
+            border-radius: 4px;
+            width: 100%;
+            box-sizing: border-box;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Videomin Interlacing video</h2>
+    
+    <input type="file" id="fileUpload" accept="video/*">
+
+    <div class="video-container">
+        <video id="sourceVideo" crossOrigin="anonymous" playsinline></video>
+        <canvas id="outputCanvas"></canvas>
+    </div>
+
+    <div class="controls-grid">
+        <div class="control-group">
+            <label>Volume <span id="volVal">50</span></label>
+            <input type="range" id="volume" min="0" max="100" value="50">
+        </div>
+        <div class="control-group">
+            <label>Interlacing Density <span id="intVal">50</span></label>
+            <input type="range" id="interlacing" min="1" max="100" value="50">
+        </div>
+        <div class="control-group">
+            <label>PAL Field Shift <span id="palVal">20</span></label>
+            <input type="range" id="palShift" min="0" max="100" value="20">
+        </div>
+        <div class="control-group">
+            <label>Overlay Interlacing<span id="overVal">30</span></label>
+            <input type="range" id="overlayInterlacing" min="0" max="100" value="30">
+        </div>
+    </div>
+
+    <div class="buttons">
+        <button id="playBtn" disabled>Play / Pause</button>
+        <button id="downloadBtn" disabled>Process & Download (AVX34)</button>
+    </div>
+    <div class="status" id="statusText"></div>
+</div>
+
+<script>
+    const video = document.getElementById('sourceVideo');
+    const canvas = document.getElementById('outputCanvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    
+    // Controls
+    const fileUpload = document.getElementById('fileUpload');
+    const playBtn = document.getElementById('playBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const statusText = document.getElementById('statusText');
+    
+    // Sliders
+    const volumeSlider = document.getElementById('volume');
+    const interlacingSlider = document.getElementById('interlacing');
+    const palShiftSlider = document.getElementById('palShift');
+    const overlaySlider = document.getElementById('overlayInterlacing');
+
+    let animationId;
+    let mediaRecorder;
+    let recordedChunks = [];
+    let isRecording = false;
+
+    // Update Slider Labels
+    const sliders = ['volume', 'interlacing', 'palShift', 'overlayInterlacing'];
+    sliders.forEach(id => {
+        const el = document.getElementById(id);
+        const valSpan = document.getElementById(id.substring(0, 3) + 'Val') || document.getElementById(id.substring(0, 4) + 'Val');
+        el.addEventListener('input', (e) => {
+            if(valSpan) valSpan.textContent = e.target.value;
+            if(id === 'volume') video.volume = e.target.value / 100;
+        });
+    });
+
+    // File Upload Handler
+    fileUpload.addEventListener('change', function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        const fileURL = URL.createObjectURL(file);
+        video.src = fileURL;
+        video.load();
+        
+        video.onloadedmetadata = () => {
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            playBtn.disabled = false;
+            downloadBtn.disabled = false;
+            video.volume = volumeSlider.value / 100;
+            statusText.textContent = "Video loaded. Ready to play or process.";
+            drawFrame(); // Draw initial frame
+        };
+    });
+
+    // Play/Pause
+    playBtn.addEventListener('click', () => {
+        if (video.paused) {
+            video.play();
+            renderLoop();
+        } else {
+            video.pause();
+            cancelAnimationFrame(animationId);
+        }
+    });
+
+    // Main Render Loop
+    function renderLoop() {
+        if (!video.paused && !video.ended) {
+            drawFrame();
+            animationId = requestAnimationFrame(renderLoop);
+        }
+    }
+
+    // Core Image Processing Frame
+    function drawFrame() {
+        if (!canvas.width || !canvas.height) return;
+
+        const width = canvas.width;
+        const height = canvas.height;
+        
+        // 1. Draw Base Video (Even Fields)
+        ctx.drawImage(video, 0, 0, width, height);
+
+        const intVal = parseInt(interlacingSlider.value);
+        // Map 1-100 to line thickness (smaller value = thicker lines)
+        const lineThickness = Math.max(1, Math.floor(20 - (intVal / 100) * 19)); 
+        
+        const shiftVal = parseInt(palShiftSlider.value);
+        // Map 0-100 to horizontal pixel shift
+        const shiftPixels = Math.floor((shiftVal / 100) * (width / 10));
+
+        // 2. Draw Shifted Video (Odd Fields for PAL tear effect)
+        if (shiftPixels > 0) {
+            ctx.save();
+            ctx.beginPath();
+            // Create a clipping mask of alternating horizontal lines
+            for (let y = 0; y < height; y += lineThickness * 2) {
+                ctx.rect(0, y, width, lineThickness);
+            }
+            ctx.clip();
+            // Draw video shifted horizontally
+            ctx.drawImage(video, shiftPixels, 0, width, height);
+            ctx.restore();
+        }
+
+        // 3. Draw Scanlines (Overlay Interlacing Darkness)
+        const overlayVal = parseInt(overlaySlider.value);
+        if (overlayVal > 0) {
+            const alpha = overlayVal / 100;
+            ctx.fillStyle = `rgba(0, 0, 0, ${alpha})`;
+            for (let y = lineThickness; y < height; y += lineThickness * 2) {
+                ctx.fillRect(0, y, width, lineThickness);
+            }
+        }
+    }
+
+    // Process and Download Logic
+    downloadBtn.addEventListener('click', () => {
+        if (isRecording) return;
+        
+        recordedChunks = [];
+        
+        // 1. Setup Canvas Video Stream
+        const canvasStream = canvas.captureStream(30); // 30 FPS
+        
+        // 2. Setup Audio Stream from Original Video
+        let audioStream;
+        if (video.captureStream) {
+            audioStream = video.captureStream();
+        } else if (video.mozCaptureStream) {
+            audioStream = video.mozCaptureStream();
+        }
+        
+        // Combine streams
+        const combinedTracks = [...canvasStream.getVideoTracks()];
+        if (audioStream && audioStream.getAudioTracks().length > 0) {
+            combinedTracks.push(audioStream.getAudioTracks()[0]);
+        }
+        
+        const combinedStream = new MediaStream(combinedTracks);
+        
+        try {
+            mediaRecorder = new MediaRecorder(combinedStream, { mimeType: 'video/webm; codecs=vp9' });
+        } catch (e) {
+            // Fallback if vp9 isn't supported
+            mediaRecorder = new MediaRecorder(combinedStream);
+        }
+
+        mediaRecorder.ondataavailable = (e) => {
+            if (e.data.size > 0) recordedChunks.push(e.data);
+        };
+
+        mediaRecorder.onstop = () => {
+            const blob = new Blob(recordedChunks, { type: 'video/webm' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            document.body.appendChild(a);
+            a.style = 'display: none';
+            a.href = url;
+            a.download = 'AVX34.webm'; // Required filename
+            a.click();
+            window.URL.revokeObjectURL(url);
+            
+            isRecording = false;
+            statusText.textContent = "Download complete!";
+            downloadBtn.disabled = false;
+            playBtn.disabled = false;
+        };
+
+        // Start Process
+        isRecording = true;
+        downloadBtn.disabled = true;
+        playBtn.disabled = true;
+        statusText.textContent = "Processing and recording... Please wait until the video finishes.";
+        
+        video.currentTime = 0; // Reset video to start
+        video.play().then(() => {
+            renderLoop();
+            mediaRecorder.start();
+            
+            // Stop recording when the video naturally ends
+            video.addEventListener('ended', function onVideoEnded() {
+                if (mediaRecorder.state === 'recording') {
+                    mediaRecorder.stop();
+                }
+                cancelAnimationFrame(animationId);
+                video.removeEventListener('ended', onVideoEnded);
+            }, { once: true });
+        });
+    });
+</script>
+
+</body>
+</html>
